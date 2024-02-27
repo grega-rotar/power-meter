@@ -70,6 +70,10 @@ HX711 scale;
 long surovaTeza;
 
 #define THRESHOLD 0.01
+// vrednost vrednosti double, ko le ta ni definirana
+// to je samo za lokalno rabo
+// FIXME: DOUBLE_NI_DEFINIRAN je neumnost
+#define DOUBLE_NI_DEFINIRAN -3412.2
 struct VrednostiMeritev
 {
 	// FIXME:  povprecjeTezaPozitivne in povprecjeTezaNegativne se updata samo ko klicemo funkciji za pridobitev povprecja
@@ -85,11 +89,12 @@ struct VrednostiMeritev
 
 	double vsotaKotnaHitrostDEG;
 	double stevecKotnaHitrostDEG;
-	PubSubClient& mqttClient;
+	bool jeNovaMocKolesarjaNaVoljo;
+	double mocKolesarja;
 
-	VrednostiMeritev(PubSubClient& client)
+	VrednostiMeritev()
 		: vsotaTezaPozitivne(0), stevecTezaPozitivne(0), povprecjeTezaPozitivne(0),
-		  vsotaTezaNegativne(0), stevecTezaNegativne(0), povprecjeTezaNegativne(0), jeTezaNaPozitivniStrani(true), vsotaKotnaHitrostDEG(0), stevecKotnaHitrostDEG(0), mqttClient(client) {}
+		  vsotaTezaNegativne(0), stevecTezaNegativne(0), povprecjeTezaNegativne(0), jeTezaNaPozitivniStrani(true), vsotaKotnaHitrostDEG(0), stevecKotnaHitrostDEG(0), jeNovaMocKolesarjaNaVoljo(false), mocKolesarja(0) {}
 
 	// funkcija, ki doda meritev teze glede na predznak
 	void dodajMeritevTeza(double vrednost)
@@ -100,9 +105,8 @@ struct VrednostiMeritev
 		// predznak enak
 		// dodajanje k trenutnim meritvam
 		case true:
-			dodajTezaGledePredznak(vrednost);
-			Serial.println(vrednost);
-      // mqttClient.publish(topic, String(vrednost).c_str());
+			// ne ponastavi vsote in stevca
+			dodajTezaGledePredznak(vrednost, false);
 			break;
 		// v tem primeru se je predznak spremenil
 		// prehod čez vrednost 0
@@ -114,55 +118,109 @@ struct VrednostiMeritev
 				// s switch izpisemu tista povprecja / vrednosti, ki smo jih sedaj merili
 				switch (jeTezaNaPozitivniStrani)
 				{
-				// predznak se bo spremenil na negativnega
-				// izracun povprecja pozitivnih vrednosti
+					// predznak se bo spremenil na negativnega
+					// izracun povprecja pozitivnih vrednosti
+					// FIXME: sedaj pridobivam povprecje na cel obrat oziroma izvajamo samo ko
+					// gre vrednost iz + na -
 				case true:
-					povprecjeTezaPozitivne = pridobiPovprecjeTezaPozitivne(true);
+					// WARNING: pazi ker se vsota in stevec ne resetira
+					// to se zgodi sele pri dodajanju nove teze
+					povprecjeTezaPozitivne = pridobiPovprecjeTezaPozitivne(false);
+					mocKolesarja = izracunajMocKolesarja();
+					jeNovaMocKolesarjaNaVoljo = true;
 					break;
 				// predznak se bo spremenil na pozitivnega
 				// izracun povprecja negativnih vrednosti
 				case false:
-					povprecjeTezaNegativne = pridobiPovprecjeTezaNegativne(true);
+					// WARNING: pazi ker se vsota in stevec ne resetira
+					// to se zgodi sele pri dodajanju nove teze
+					povprecjeTezaNegativne = pridobiPovprecjeTezaNegativne(false);
 					break;
 				}
 				// funkcije, ki se zgodijo ob menjavi predznaka
-				double mocKolesarja = pridobiMocKolesarja();
-				mqttClient.publish(topic, String(mocKolesarja).c_str());
+
 				// jeTezaNaPozitivniStrani se spremeni v predznak trenutnih meritev
 				jeTezaNaPozitivniStrani = jePredznakPozitiven(vrednost);
 				// dodana je trenutna vrednost k meritvam
-				dodajTezaGledePredznak(vrednost);
+				dodajTezaGledePredznak(vrednost, true);
 				// izpis trenutne meritve
 				Serial.println(vrednost);
 			}
 		}
 	}
 
-	// vrne moc kolesarja v W
-	double pridobiMocKolesarja()
+	// vrne moc kolesarja v Watt
+	double izracunajMocKolesarja()
 	{
 		// povprecna kotna hitrost v deg/s
 		double povprecnaKotnaHitrostDEG = pridobiPovprecjeKotnaHitrostDEG(true);
 		// povprecna kotna hitrost v rad/s
 		double kotnaHitrostRAD = (povprecnaKotnaHitrostDEG * PI) / 180.0;
-		double povprecnaTezaKG = povprecjeTezaNegativne + povprecjeTezaPozitivne;
+		// double povprecnaTezaKG = povprecjeTezaNegativne + povprecjeTezaPozitivne;
+		double povprecnaTezaKG = (vsotaTezaNegativne + vsotaTezaPozitivne) / (stevecTezaNegativne + stevecTezaPozitivne);
 		double povprecnaSilaNaPedalo = povprecnaTezaKG * G_ACC;
 		double povprecenNavor = povprecnaSilaNaPedalo * GONILKA_ROCICA_M;
 		double mocKolesarja = povprecenNavor * kotnaHitrostRAD;
+		// WARNING: moc kolesarja ja najverjetnjeje 2x ta moč
+		// ker sem uporabil povprečje na enem pedalu na 2pi
+		mocKolesarja = mocKolesarja * 2;
 		return mocKolesarja;
 	}
 
-	// doda tezo k vsoti tez
-	void dodajTezaGledePredznak(double vrednost)
+	double pridobiMocKolesarja()
+	{
+		if (jeNovaMocKolesarjaNaVoljo)
+		{
+			return mocKolesarja;
+		}
+		else
+		{
+			return DOUBLE_NI_DEFINIRAN;
+		}
+	}
+
+	// PROBLEM: problem se pojavi, ko na primer poganjamo z spedeji
+	// če se predznak nikoli ne spremeni se tudi načeloma ne bi izračunala moč kolesarja
+	// s tem izsilimo novo vrednost
+	double forcePridobiMocKolesarja()
+	{
+		// povprecna kotna hitrost v deg/s
+		double povprecnaKotnaHitrostDEG = pridobiPovprecjeKotnaHitrostDEG(true);
+		// povprecna kotna hitrost v rad/s
+		double kotnaHitrostRAD = (povprecnaKotnaHitrostDEG * PI) / 180.0;
+		// double povprecnaTezaKG = povprecjeTezaNegativne + povprecjeTezaPozitivne;
+		double povprecnaTezaKG = (vsotaTezaNegativne + vsotaTezaPozitivne) / (stevecTezaNegativne + stevecTezaPozitivne);
+		double povprecnaSilaNaPedalo = povprecnaTezaKG * G_ACC;
+		double povprecenNavor = povprecnaSilaNaPedalo * GONILKA_ROCICA_M;
+		double mocKolesarja = povprecenNavor * kotnaHitrostRAD;
+		// WARNING: moc kolesarja ja najverjetnjeje 2x ta moč
+		// ker sem uporabil povprečje na enem pedalu na 2pi
+		mocKolesarja = mocKolesarja * 2;
+		// s tem zagotovimo, da se je vse spremenljivke za tezo nastavijo na 0
+		ponastavi();
+		return mocKolesarja;
+	}
+	// doda težo k vsoti tež
+	void dodajTezaGledePredznak(double vrednost, bool ponastaviVsotoStevec)
 	{
 		bool vrednostPredznak = jePredznakPozitiven(vrednost);
 		switch (vrednostPredznak)
 		{
 		case true:
+			if (ponastaviVsotoStevec)
+			{
+				vsotaTezaPozitivne = 0;
+				stevecTezaPozitivne = 0;
+			}
 			vsotaTezaPozitivne += vrednost;
 			stevecTezaPozitivne++;
 			break;
 		case false:
+			if (ponastaviVsotoStevec)
+			{
+				vsotaTezaNegativne = 0;
+				stevecTezaNegativne = 0;
+			}
 			vsotaTezaNegativne += vrednost;
 			stevecTezaNegativne++;
 		}
@@ -264,7 +322,8 @@ void setup()
 
 	// hx711
 	scale.begin(SCALE_DOUT_PIN, SCALE_SCK_PIN);
-	scale.set_offset(-887600);
+	// pri kalibraciji je bilo nastavljeno tako
+	// scale.set_offset(-887600);
 
 	WiFi.begin(ssid, pass);
 	while (WiFi.status() != WL_CONNECTED)
@@ -298,13 +357,16 @@ void setup()
 // globalne spremenljivke za
 double trenutnaTezaKG;
 double trenutnaKotnaHitrostDEG;
+double trenutnaMoc;
+
+#define MIN_MERITVE_RAZMIK_MS 2000
+unsigned int casZadnjaMeritev;
 
 // inicalizacija VrednostiMeritev
-VrednostiMeritev vrednostiMeritev(client);
+VrednostiMeritev vrednostiMeritev();
 
 void loop()
 {
-
 	// posodobi vrednosti pospeškomera
 	pridobiAccelVrednosti();
 	// posodobi vrednost žiroskopa
@@ -312,11 +374,23 @@ void loop()
 	// posodobi trenutno vrednost teze
 	pridobiSurovoTezo();
 
-	trenutnaTezaKG = ((surovaTeza - (-107400.0)) / -74170.0) - 4.5;
+	trenutnaTezaKG = ((surovaTeza - (-107400.0 -887600.0)) / -74170.0) - 4.5;
 	trenutnaKotnaHitrostDEG = sqrt(pow(rotX, 2) + pow(rotY, 2) + pow(rotZ, 2));
 	vrednostiMeritev.dodajKotnaHitrostDEG(trenutnaKotnaHitrostDEG);
 	vrednostiMeritev.dodajMeritevTeza(trenutnaTezaKG);
 
+	if (vrednostiMeritev.jeNovaMocKolesarjaNaVoljo)
+	{
+		casZadnjaMeritev = millis();
+		trenutnaMoc = vrednostiMeritev.pridobiMocKolesarja();
+	}
+	// če je od zadnje meritve minilo več kot MIN_MERITVE_RAZMIK_MS potem
+	// forcePridobiMocKolesarja, ker ni prehoda med negativnimi in pozitivnimi
+	else if (millis() - casZadnjaMeritev > MIN_MERITVE_RAZMIK_MS)
+	{
+		trenutnaMoc = vrednostiMeritev.forcePridobiMocKolesarja();
+		casZadnjaMeritev = millis();
+	}
 	delay(15);
 }
 
@@ -326,7 +400,7 @@ void pridobiSurovoTezo()
 {
 	if (scale.is_ready())
 	{
-		surovaTeza = scale.get_value(1);
+		surovaTeza = scale.read_average(1);
 	}
 }
 
@@ -465,7 +539,6 @@ void procesirajZiroVrednosti()
 	rotY = rotY / LSB_DEG;
 	rotZ = rotZ / LSB_DEG;
 }
-
 
 // FIXME: ko odpravis mqtt lahko izbrišeš
 char generateRandomChar()
