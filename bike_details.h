@@ -1,0 +1,1 @@
+#define GONILKA_ROCICA_M 0.155

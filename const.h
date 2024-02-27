@@ -1,0 +1,1 @@
+#define G_ACC 9.80665
