@@ -102,6 +102,7 @@ struct VrednostiMeritev
 		case true:
 			dodajTezaGledePredznak(vrednost);
 			Serial.println(vrednost);
+      // mqttClient.publish(topic, String(vrednost).c_str());
 			break;
 		// v tem primeru se je predznak spremenil
 		// prehod čez vrednost 0
@@ -263,7 +264,7 @@ void setup()
 
 	// hx711
 	scale.begin(SCALE_DOUT_PIN, SCALE_SCK_PIN);
-	// scale.set_offset(-887600);
+	scale.set_offset(-887600);
 
 	WiFi.begin(ssid, pass);
 	while (WiFi.status() != WL_CONNECTED)
@@ -325,7 +326,7 @@ void pridobiSurovoTezo()
 {
 	if (scale.is_ready())
 	{
-		surovaTeza = scale.read_average(1);
+		surovaTeza = scale.get_value(1);
 	}
 }
 
